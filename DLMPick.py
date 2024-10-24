@@ -43,6 +43,10 @@ class SeismicGUI:
         self.decrease_amplitude_button = tk.Button(self.frame, text="-", command=self.decrease_amplitude)
         self.decrease_amplitude_button.pack(side=tk.LEFT, padx=5, pady=5)
 
+        # Reset Amplitude Button
+        self.reset_amplitude_button = tk.Button(self.frame, text="↶", command=self.reset_amplitude)
+        self.reset_amplitude_button.pack(side=tk.LEFT, padx=5, pady=5)
+
         # Figure and Axes for plotting
         self.fig, self.axs = plt.subplots(3, 1, sharex=True, figsize=(8, 6), gridspec_kw={'hspace': 0})
         self.canvas = FigureCanvasTkAgg(self.fig, master=root)
@@ -125,6 +129,7 @@ class SeismicGUI:
             if self.amplitude_factor == 1.0:
                 self.initial_ylim = (np.min(tr.data) * 1.1, np.max(tr.data) * 1.1)
             self.axs[i].set_ylim(self.initial_ylim)
+            self.initial_xlim.append(self.axs[i].get_xlim())
 
         self.axs[2].set_xlabel("Time (s)")
         self.fig.tight_layout()
@@ -168,13 +173,14 @@ class SeismicGUI:
 
     def increase_amplitude(self):
         self.amplitude_factor *= 1.2
-          # Maintain fixed y-axis limits
         self.update_amplitude()
 
     def decrease_amplitude(self):
         self.amplitude_factor /= 1.2
-          # Maintain fixed y-axis limits
-        self.plot_data()
+        self.update_amplitude()
+
+    def reset_amplitude(self):
+        self.amplitude_factor = 1.0
         self.update_amplitude()
 
     def on_key_press(self, event):
