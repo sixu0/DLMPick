@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 class SeismicGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Seismic Data Viewer")
+        self.root.title("Seismic Data Picking Viewer")
         self.eqt_model = sbm.EQTransformer.from_pretrained("original")
 
         # Frame for buttons
@@ -47,6 +47,22 @@ class SeismicGUI:
         self.reset_amplitude_button = tk.Button(self.frame, text="↶", command=self.reset_amplitude)
         self.reset_amplitude_button.pack(side=tk.LEFT, padx=5, pady=5)
 
+        # Text box for bandpass filter parameters
+        self.filter_frame = tk.Frame(root)
+        self.filter_frame.pack(side=tk.TOP, fill=tk.X)
+        self.low_freq_label = tk.Label(self.filter_frame, text="Low Frequency (Hz):")
+        self.low_freq_label.pack(side=tk.LEFT, padx=5, pady=5)
+        self.low_freq_entry = tk.Entry(self.filter_frame, width=10)
+        self.low_freq_entry.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.high_freq_label = tk.Label(self.filter_frame, text="High Frequency (Hz):")
+        self.high_freq_label.pack(side=tk.LEFT, padx=5, pady=5)
+        self.high_freq_entry = tk.Entry(self.filter_frame, width=10)
+        self.high_freq_entry.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.apply_filter_button = tk.Button(self.filter_frame, text="Apply Filter", command=self.apply_filter)
+        self.apply_filter_button.pack(side=tk.LEFT, padx=5, pady=5)
+
         # Figure and Axes for plotting
         self.fig, self.axs = plt.subplots(3, 1, sharex=True, figsize=(8, 6), gridspec_kw={'hspace': 0})
         self.canvas = FigureCanvasTkAgg(self.fig, master=root)
@@ -54,6 +70,7 @@ class SeismicGUI:
 
         # Variables to hold data
         self.stream = None
+        self.filtered_stream = None  # Store filtered version for plotting
         self.selected_sample = None
         self.selected_sample_s = None
         self.initial_xlim = []
@@ -69,6 +86,7 @@ class SeismicGUI:
         self.fig.canvas.mpl_connect('button_press_event', self.on_press_drag)
         self.fig.canvas.mpl_connect('button_release_event', self.on_release)
         self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
+        
 
     def load_sac_file(self):
         self.file_path = filedialog.askopenfilename(filetypes=[("All files", "*.*"), ("SAC files", "*.SAC")])
@@ -76,23 +94,22 @@ class SeismicGUI:
             return
 
         # Automatically load DPN, DPE, DPZ files
-        base_path = os.path.splitext(self.file_path)[0][:-3]  # Remove .DPN/.DPE/.DPZ
-        dpn_path = base_path + "DPZ.SAC"
-        dpe_path = base_path + "DPN.SAC"
-        dpz_path = base_path + "DPE.SAC"
+        self.base_path = os.path.splitext(self.file_path)[0][:-3]  # Remove .DPN/.DPE/.DPZ
+        self.dpz_path = self.base_path + "DPZ.SAC"
+        self.dpn_path = self.base_path + "DPN.SAC"
+        self.dpe_path = self.base_path + "DPE.SAC"
 
         try:
             self.stream = obspy.Stream()
-            if os.path.exists(dpn_path):
-                self.stream += read(dpn_path)
-            if os.path.exists(dpe_path):
-                self.stream += read(dpe_path)
-            if os.path.exists(dpz_path):
-                self.stream += read(dpz_path)
+            if os.path.exists(self.dpz_path):
+                self.stream += read(self.dpz_path)
+            if os.path.exists(self.dpn_path):
+                self.stream += read(self.dpn_path)
+            if os.path.exists(self.dpe_path):
+                self.stream += read(self.dpe_path)
         except FileNotFoundError:
             tk.messagebox.showerror("Error", "Could not find all components (DPN, DPE, DPZ)")
             return
-
 
         for ax in self.axs:
             ax.clear()
@@ -106,25 +123,46 @@ class SeismicGUI:
         self.previous_mouse_x = None
         self.initial_xlim = []
         self.amplitude_factor = 1.0
+        
+        self.filtered_stream = self.stream.copy()  # Keep a copy of the original stream for filtering
+        
+        eqt_preds = self.eqt_model.annotate(self.stream)
+        if 'user7' in self.stream[0].stats.sac:
+            self.p_label = self.stream[0].stats.sac['user7']
+        else:
+            p_idx = np.argmax(eqt_preds[1])
+            self.p_label = eqt_preds[1].stats.starttime - self.stream[0].stats.starttime + (p_idx / 100)
+        if 'user8' in self.stream[0].stats.sac:
+            self.s_label = self.stream[0].stats.sac['user8']
+        else:
+            s_idx = np.argmax(eqt_preds[2])
+            self.s_label = eqt_preds[1].stats.starttime - self.stream[0].stats.starttime + (s_idx / 100)
+        if 'a' in self.stream[0].stats.sac:
+            self.selected_sample = self.stream[0].stats.sac['a']
+        if 't0' in self.stream[0].stats.sac:
+            self.selected_sample_s = self.stream[0].stats.sac['t0']
 
+        # Convert indices to actual times
+        self.components = ['DPZ', 'DPN', 'DPE']
         print(self.stream)
 
     def plot_data(self):
-        if self.stream is None:
+        if self.filtered_stream is None and self.stream is None:
             return
 
         for ax in self.axs:
             ax.clear()
 
-        eqt_preds = self.eqt_model.annotate(self.stream)
-        p_label = np.argmax(eqt_preds[1]) / 100
-        s_label = np.argmax(eqt_preds[2]) / 100
+        stream_to_plot = self.filtered_stream if self.filtered_stream is not None else self.stream
 
-        components = ['DPZ', 'DPN', 'DPE']
-        for i, tr in enumerate(self.stream[:3]):
-            self.axs[i].plot(tr.times(), tr.data * self.amplitude_factor, color='black', label=components[i])
-            self.axs[i].axvline(p_label, color='green', linestyle='--')
-            self.axs[i].axvline(s_label, color='green', linestyle='--')
+        for i, tr in enumerate(stream_to_plot[:3]):
+            self.axs[i].plot(tr.times(), tr.data * self.amplitude_factor, color='black', label=self.components[i])
+            self.axs[i].axvline(self.p_label, color='green', linestyle='--')
+            self.axs[i].axvline(self.s_label, color='green', linestyle='--')
+            if self.selected_sample is not None:
+                self.vertical_lines[i] = self.axs[i].axvline(self.selected_sample, color='blue', linestyle='--')
+            if self.selected_sample_s is not None:
+                self.red_lines[i] = self.axs[i].axvline(self.selected_sample_s, color='red', linestyle='--')
             self.axs[i].legend(loc='upper right')
             if self.amplitude_factor == 1.0:
                 self.initial_ylim = (np.min(tr.data) * 1.1, np.max(tr.data) * 1.1)
@@ -135,31 +173,49 @@ class SeismicGUI:
         self.fig.tight_layout()
         self.canvas.draw()
 
+    def apply_filter(self):
+        if self.stream is None:
+            tk.messagebox.showwarning("Warning", "No data loaded.")
+            return
+
+        try:
+            low_freq = float(self.low_freq_entry.get())
+            high_freq = float(self.high_freq_entry.get())
+        except ValueError:
+            tk.messagebox.showerror("Error", "Invalid filter parameters.")
+            return
+
+        if low_freq >= high_freq:
+            tk.messagebox.showerror("Error", "Low frequency must be less than high frequency.")
+            return
+
+        self.filtered_stream = self.stream.copy()  # Copy original stream before applying filter
+        self.filtered_stream.filter('bandpass', freqmin=low_freq, freqmax=high_freq)
+        self.plot_data()
+
     def update_amplitude(self):
-        for i, tr in enumerate(self.stream[:3]):
+        stream_to_plot = self.filtered_stream if self.filtered_stream is not None else self.stream
+
+        for i, tr in enumerate(stream_to_plot[:3]):
             self.axs[i].clear()
             self.axs[i].plot(tr.times(), tr.data * self.amplitude_factor, color='black')
             self.axs[i].set_ylim(self.initial_ylim)
 
         self.canvas.draw()
-        if self.stream is None:
+
+        if stream_to_plot is None:
             return
 
         for ax in self.axs:
             ax.clear()
 
-        eqt_preds = self.eqt_model.annotate(self.stream)
-        p_label = np.argmax(eqt_preds[1]) / 100
-        s_label = np.argmax(eqt_preds[2]) / 100
-
-        components = ['DPZ', 'DPN', 'DPE']
-        for i, tr in enumerate(self.stream[:3]):
-            self.axs[i].plot(tr.times(), tr.data * self.amplitude_factor, color='black', label=components[i])
-            self.axs[i].axvline(p_label, color='green', linestyle='--')
-            self.axs[i].axvline(s_label, color='green', linestyle='--')
+        for i, tr in enumerate(stream_to_plot[:3]):
+            self.axs[i].plot(tr.times(), tr.data * self.amplitude_factor, color='black', label=self.components[i])
+            self.axs[i].axvline(self.p_label, color='green', linestyle='--')
+            self.axs[i].axvline(self.s_label, color='green', linestyle='--')
             self.axs[i].legend(loc='upper right')
             if self.selected_sample is not None:
-                self.axs[i].axvline(self.selected_sample, color='blue', linestyle='--')
+                self.vertical_lines[i] = self.axs[i].axvline(self.selected_sample, color='blue', linestyle='--')
             if self.selected_sample_s is not None:
                 self.red_lines[i] = self.axs[i].axvline(self.selected_sample_s, color='red', linestyle='--')
             if self.amplitude_factor == 1.0:
@@ -184,7 +240,7 @@ class SeismicGUI:
         self.update_amplitude()
 
     def on_key_press(self, event):
-        if event.key == 'p' and self.stream is not None:
+        if event.key == 'p' and (self.filtered_stream is not None or self.stream is not None):
             # Mark the point when 'P' key is pressed
             for i, ax in enumerate(self.axs):
                 if self.vertical_lines[i] is not None:
@@ -196,7 +252,7 @@ class SeismicGUI:
             # Print selected point (for debugging)
             print(f"Marked sample at time: {event.xdata}")
 
-        elif event.key == 's' and self.stream is not None:
+        elif event.key == 's' and (self.filtered_stream is not None or self.stream is not None):
             # Mark another point when 'S' key is pressed
             for i, ax in enumerate(self.axs):
                 if self.red_lines[i] is not None:
@@ -207,6 +263,13 @@ class SeismicGUI:
 
             # Print selected point (for debugging)
             print(f"Marked sample with 'S' at time: {event.xdata}")
+
+        elif event.key == 'q':
+            # Zoom out using 'q' key
+            self.on_scroll(type('event', (object,), {'step': -1, 'xdata': None}))
+        elif event.key == 'w':
+            # Zoom in using 'w' key
+            self.on_scroll(type('event', (object,), {'step': 1, 'xdata': None}))
 
     def on_scroll(self, event):
         base_scale = 1.1
@@ -255,22 +318,22 @@ class SeismicGUI:
         if self.stream is None:
             tk.messagebox.showwarning("Warning", "No data loaded.")
             return
-
-        dpz_trace = self.stream.select(component="Z")[0]
-        base_path = os.path.splitext(self.file_path)[0][:-3]
-        default_name = os.path.basename(base_path) + "pick.SAC"  # Only file name
-        save_path = filedialog.asksaveasfilename(defaultextension=".SAC", initialfile=default_name, filetypes=[("SAC files", "*.SAC")])
-        if not save_path:
-            return
-
-        # Update header with selected samples
-        if self.selected_sample is not None:
-            dpz_trace.stats.sac['user1'] = float(self.selected_sample)
-        if self.selected_sample_s is not None:
-            dpz_trace.stats.sac['user2'] = float(self.selected_sample_s)
-
+        
+        for trace in self.stream:
+            # Update header with selected samples
+            if self.selected_sample is not None:
+                trace.stats.sac['a'] = float(self.selected_sample)
+            if self.selected_sample_s is not None:
+                trace.stats.sac['t0'] = float(self.selected_sample_s)
+            if self.p_label is not None:
+                trace.stats.sac['user7'] = float(self.p_label)
+            if self.s_label is not None:
+                trace.stats.sac['user8'] = float(self.s_label)
+            
         # Write to new SAC file
-        dpz_trace.write(save_path, format='SAC')
+        self.stream[0].write(self.dpz_path, format='SAC')
+        self.stream[1].write(self.dpn_path, format='SAC')
+        self.stream[2].write(self.dpe_path, format='SAC')
         tk.messagebox.showinfo("Info", "File saved successfully.")
 
 if __name__ == "__main__":
